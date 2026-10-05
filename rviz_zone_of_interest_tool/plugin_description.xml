@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: Czech Technical University in Prague
+-->
+
+<library path="rviz_zone_of_interest_tool_plugin">
+  <class name="rviz_zone_of_interest_tool/ZoneOfInterestTool" type="rviz_zone_of_interest_tool::ZoneOfInterestTool" base_class_type="rviz_common::Tool">
+    <description>
+      Rviz tool for creating a polygonal zone of interest.
+    </description>
+  </class>
+</library>

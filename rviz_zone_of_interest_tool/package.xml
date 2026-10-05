@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<!--
+SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: Czech Technical University in Prague
+-->
+<package format="3">
+  <name>rviz_zone_of_interest_tool</name>
+  <version>0.0.0</version>
+  <description>Provides an RViz tool that can define polygonal zones of interest.</description>
+  <maintainer email="peckama2@fel.cvut.cz">Martin Pecka</maintainer>
+  <license>Apache-2.0</license>
+
+  <author>Martin Pecka</author>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>polygon_msgs</depend>
+  <depend>rviz_common</depend>
+  <depend>rviz_rendering</depend>
+
+  <build_depend>pluginlib</build_depend>
+
+  <exec_depend>pluginlib</exec_depend>
+
+  <test_depend>cras_lint</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
