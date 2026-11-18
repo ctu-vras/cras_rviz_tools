@@ -37,6 +37,8 @@ ament_export_dependencies(
 )
 pluginlib_export_plugin_description_file(rviz_common plugin_description.xml)
 
+install(DIRECTORY rviz DESTINATION share/${PROJECT_NAME}/)
+
 if(BUILD_TESTING)
   find_package(cras_lint REQUIRED)
   cras_lint_common()

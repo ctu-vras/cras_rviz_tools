@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: Czech Technical University in Prague
+-->
+
+<library path="cras_rviz_vision_msgs_plugin">
+  <class name="cras_rviz_vision_msgs/Detection2DArray"
+         type="cras_rviz_vision_msgs::Detection2DArrayDisplay"
+         base_class_type="rviz_common::Display">
+    <description>
+      Visualizes detections in the 2D image plane (vision_msgs/Detection2DArray), optionally with a preview of the
+      source camera image attached to each detection.
+    </description>
+    <message_type>vision_msgs/msg/Detection2DArray</message_type>
+  </class>
+</library>
