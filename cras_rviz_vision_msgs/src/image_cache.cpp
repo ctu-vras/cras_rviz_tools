@@ -113,6 +113,9 @@ rclcpp::Time ImageCache::add(const sensor_msgs::msg::CompressedImage::ConstShare
       factor *= 2;
     }
   }
+  // The previews are cut out of the images in the resolution the camera published (that is the resolution the
+  // detections' bounding boxes are given in), so the cache has to know how big the decoded image is w.r.t. it.
+  auto decodedScale = 1.;
   try {
     const cv::Mat blob(1, static_cast<int>(image->data.size()), CV_8UC1,
         const_cast<uint8_t*>(image->data.data()));  // NOLINT: imdecode only reads the data
@@ -123,7 +126,16 @@ rclcpp::Time ImageCache::add(const sensor_msgs::msg::CompressedImage::ConstShare
     if (pixels.empty()) {
       throw std::runtime_error("the image could not be decoded");
     }
-    sourceWidths_[frameId] = static_cast<int64_t>(pixels.cols) * factor;
+    // The reduced decoding is only a request the decoder does not have to honour (and the resolution of a camera is
+    // known only from the images which came before), so check what really came out of the decoder before the reduction
+    // is believed. A different size means the camera reports another resolution than the one assumed; that is the
+    // resolution to use for the following images.
+    const auto fullWidth = static_cast<double>(pixels.cols) * static_cast<double>(factor);
+    if (sourceWidth > 0 && std::abs(fullWidth - static_cast<double>(sourceWidth)) <= factor) {
+      decodedScale = 1. / static_cast<double>(factor);
+    } else {
+      sourceWidths_[frameId] = static_cast<int64_t>(fullWidth);
+    }
     cvImage = cv_bridge::cvtColor(std::make_shared<const cv_bridge::CvImage>(
       cv_bridge::CvImage(image->header, "bgr8", std::move(pixels))), targetEncoding(decoded));
   } catch (const std::exception& e) {
@@ -131,11 +143,11 @@ rclcpp::Time ImageCache::add(const sensor_msgs::msg::CompressedImage::ConstShare
     return {0, 0};
   }
 
-  return store(cvImage, rclcpp::Time(image->header.stamp), maxImageSize);
+  return store(cvImage, rclcpp::Time(image->header.stamp), maxImageSize, decodedScale);
 }
 
 rclcpp::Time ImageCache::store(const cv_bridge::CvImageConstPtr& image, const rclcpp::Time& stamp,
-    size_t maxImageSize) {
+    size_t maxImageSize, double decodedScale) {
   if (!image || image->image.empty()) {
     lastError_ = "Received an empty image.";
     return {0, 0};
@@ -148,10 +160,12 @@ rclcpp::Time ImageCache::store(const cv_bridge::CvImageConstPtr& image, const rc
   CameraImage entry;
   entry.stamp = stamp;
   entry.frameId = image->header.frame_id;
-  sourceWidths_.insert({entry.frameId, static_cast<int64_t>(width)});
+  sourceWidths_.insert({entry.frameId, static_cast<int64_t>(width / decodedScale)});
+  entry.scale = decodedScale;
   if (maxImageSize > 0 && std::max(width, height) > maxImageSize) {
-    entry.scale = static_cast<double>(maxImageSize) / static_cast<double>(std::max(width, height));
-    cv::resize(stored.image, stored.image, cv::Size(), entry.scale, entry.scale, cv::INTER_AREA);
+    const auto scale = static_cast<double>(maxImageSize) / static_cast<double>(std::max(width, height));
+    cv::resize(stored.image, stored.image, cv::Size(), scale, scale, cv::INTER_AREA);
+    entry.scale *= scale;
   }
   entry.image = std::make_shared<const cv_bridge::CvImage>(std::move(stored));
 

@@ -33,7 +33,9 @@ namespace cras_rviz_vision_msgs {
 struct CameraImage {
   cv_bridge::CvImageConstPtr image;  //!< The (possibly downscaled) image.
   rclcpp::Time stamp {0, 0};  //!< Stamp of the original image.
-  double scale {1.};  //!< Size of the stored image w.r.t. the original image.
+  //! Size of the stored image w.r.t. the image as the camera published it. The bounding boxes of the detections are
+  //! given in the resolution the camera used, so it is the only scale which can find their place in the stored image.
+  double scale {1.};
   std::string frameId;  //!< Frame of the camera the image comes from.
 
   explicit operator bool() const {
@@ -183,9 +185,15 @@ protected:
 
   /**
    * \brief Stores an already decoded image (the downscaling and the cache size limit are applied here).
+   * \param[in] image The decoded image.
+   * \param[in] stamp Stamp of the image.
+   * \param[in] maxImageSize Maximal width/height of the stored image in pixels. 0 disables scaling.
+   * \param[in] decodedScale Size of the decoded image w.r.t. the image as it arrived (a compressed image can be
+   *            decoded in a reduced size, see \ref add for the compressed variant).
    * \note The mutex has to be held by the caller.
    */
-  rclcpp::Time store(const cv_bridge::CvImageConstPtr& image, const rclcpp::Time& stamp, size_t maxImageSize);
+  rclcpp::Time store(const cv_bridge::CvImageConstPtr& image, const rclcpp::Time& stamp, size_t maxImageSize,
+      double decodedScale = 1.);
 
   //! Remembers why the last image could not be used and logs it (only once per encoding, to not spam the log).
   void failed(const std::string& frameId, const std::string& encoding, const std::string& what);

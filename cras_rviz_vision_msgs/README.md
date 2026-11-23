@@ -47,6 +47,13 @@ the closest to the timestamp of the detection message (within *Image time tolera
 previews of that message, and the part of it around the detection bounding box is shown. The preview is drawn in the
 plane of the screen, so it always faces the camera.
 
+The picture of a detection is the same cutout whatever size the images arrive in or are kept in: the cache shrinks the
+images (a JPEG is decoded directly in a reduced size) to save memory and upload time, while the bounding boxes of the
+detections are given in the resolution the camera published, and the cutout is looked up in that one. The cutout of a
+detection whose box reaches over the border of the image is moved inside of the image rather than cut there, so the
+object keeps its place in the middle of its picture - which is also the rule the crops of the `detection_visualizer`
+node follow, see [Selecting a detection](#selecting-a-detection).
+
 The previews all have the same size in the view (*Image previews/Preview width*), so the space they take does not
 depend on how far the detections are, and showing a preview of every detection would quickly cover the whole view. The
 display therefore adapts to the space available in the view:
@@ -126,7 +133,7 @@ of them is what makes two things work:
   zone, and after *Markers/Max. age out of a zone* (default 0) if it is not - an object which got into a zone is
   usually the one the operator wants to keep an eye on, so it can be allowed to stay longer than the ones walking
   around outside. A lifetime of 0 means the detections of that kind are kept until *Max. markers* makes room for a
-  newer one. The detections read from the persistent history are a record of the past and are not aged out by this.
+  newer one. The detections read from the persistent history are aged the same way, by the time they were recorded.
 
 Forgetting a detection means it really disappears: its sphere, its label and its image preview are all dropped, and the
 space the preview took becomes available for another detection. What the display knows about the zones - how many of
@@ -239,7 +246,10 @@ differences between the two sources are deliberate:
   position is then the one in the frame of the keep-out zones, which the recorder resolved when the detection arrived.
   Set the *Global frame* property to an empty string to always use the local frame of the recorded mission.
 - Their preview comes from the image cropped around the detection bounding box and saved with it, so no live camera
-  images are needed to look at the history.
+  images are needed to look at the history. That crop is the picture of the stored detection and stays its picture: it
+  is the same cutout a detection received on the topic shows (its bounding box made *Image previews/Preview padding*
+  times bigger), and a click which highlights a stored detection does not re-cut it from some camera image of the moment
+  - the place in the saved crop is a place in the crop, not in a picture of the camera as it looks now.
 - They are loaded only after *Persistent history/Start delay*, and then in batches with *Batch pause* between them, so
   that reading thousands of stored detections does not freeze the user interface. The loading progress and the number of
   the detections which were loaded, filtered out, and which are really shown are all reported in the status.

@@ -182,6 +182,34 @@ TEST(ImageCache, ScalesDownLargeImages)
   EXPECT_DOUBLE_EQ(image.scale, .5);
 }
 
+TEST(ImageCache, ReducedDecodingKeepsTheScaleOfThePublishedImage)
+{
+  cras_rviz_vision_msgs::ImageCache cache;
+
+  // JPEG can decode an image directly in a reduced size, which is much cheaper than decoding it in full, and the cache
+  // makes use of it from the second image of a camera on. The bounding boxes of the detections are given in the
+  // resolution the camera published, so the cache has to keep the scale w.r.t. that one - not w.r.t. the image the
+  // decoder produced - otherwise the previews are cut out of a wrong place of the image.
+  const auto first = cache.add(makeCompressed(1000000000, 1600, 900), 640);
+  const auto second = cache.add(makeCompressed(2000000000, 1600, 900), 640);
+  ASSERT_NE(first.nanoseconds(), 0);
+  ASSERT_NE(second.nanoseconds(), 0);
+  ASSERT_EQ(cache.size(), 2);
+
+  for (const auto& stamp : {first, second}) {
+    const auto image = cache.get(stamp, 0.1);
+    ASSERT_TRUE(static_cast<bool>(image));
+    EXPECT_EQ(image.image->image.cols, 640);
+    EXPECT_EQ(image.image->image.rows, 360);
+    // The first image is decoded in full and scaled to 640 px, the second one is decoded in half and scaled once more;
+    // both end up in the same size and have to report the same scale of it.
+    EXPECT_DOUBLE_EQ(image.scale, .4);
+    // A bounding box given in the resolution the camera published has to land where it belongs in the stored image.
+    EXPECT_EQ(cras_rviz_vision_msgs::TextureCache::sourceRect(image, {800., 450., 200., 200.}),
+        cv::Rect(320, 180, 80, 80));
+  }
+}
+
 TEST(ImageCache, TellsWhichPartOfTheImageAPreviewShows)
 {
   cras_rviz_vision_msgs::ImageCache cache;

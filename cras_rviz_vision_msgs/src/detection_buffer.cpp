@@ -244,10 +244,20 @@ void DetectionBuffer::reindex() {
 void DetectionBuffer::adoptPreview(StoredDetection& fresh, const StoredDetection& previous) {
   // The preview belongs to the detection as such, not to the message which reported it: a detection which keeps being
   // reported (or which is replaced by an almost identical one) keeps showing the image it was first seen in.
-  fresh.previewStamp = previous.previewStamp;
-  fresh.previewRegion = previous.previewRegion;
-  fresh.previewNs = previous.previewNs;
-  fresh.previewTaken = previous.previewTaken;
+  // The preview is a place in one particular picture, and it only says something about the object while the picture
+  // stays the same. A detection received on the topic shows a part of a camera image, all of them in the same
+  // resolution, while a detection read from the persistent storage shows the crop which was saved with it, and every
+  // stored detection has its own crop of its own size.
+  // So the preview can be taken over only between detections which show the same kind of picture, and between stored
+  // detections only when they were saved as the same crop. Taking a place from another picture would show a piece of
+  // the picture which has nothing to do with the detection - the object somewhere else of the picture, or the whole
+  // picture instead of the object.
+  if (previous.history == fresh.history && previous.imagePath == fresh.imagePath) {
+    fresh.previewStamp = previous.previewStamp;
+    fresh.previewRegion = previous.previewRegion;
+    fresh.previewNs = previous.previewNs;
+    fresh.previewTaken = previous.previewTaken;
+  }
   choosePreview(fresh);
 }
 
@@ -517,6 +527,12 @@ bool DetectionBuffer::retakePreview(uint64_t serial, const Selection& selection)
   for (auto& detection : detections_) {
     if (detection.serial != serial) {
       continue;
+    }
+    if (detection.history) {
+      // The picture of a detection read from the persistent storage is the crop which was saved with it, and that one
+      // is the picture of the object. The clicked image is a picture of the camera as it looks now, and the place in
+      // the saved crop means nothing in it (and the other way round), so a stored detection keeps showing its crop.
+      return false;
     }
     detection.previewStamp = selection.stamp;
     // The preview shows the bounding box of the detection and the same surroundings around it as the picture of the

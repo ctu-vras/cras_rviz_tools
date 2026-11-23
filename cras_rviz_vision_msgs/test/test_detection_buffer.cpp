@@ -458,6 +458,79 @@ TEST(DetectionBuffer, SeparatesTheStoredDetectionsFromTheReceivedOnes)
   EXPECT_EQ(buffer.size(), 0U);
 }
 
+TEST(DetectionBuffer, StoredAndReceivedPictureStayApart)
+{
+  DetectionBuffer buffer;
+  // A detection read from the persistent storage and a detection received on the topic are the same object when the
+  // recorder and the detector report the same tracker ID - which is what happens when the same mission is replayed.
+
+  auto stored = makeDetection(1 * SECOND, 10., 655., "tracked");
+  stored.history = true;
+  stored.imagePath = "/tmp/detection.jpg";
+  stored.imageRegion = {0., 0., 567., 1026.};  // the whole saved crop, as the display of a stored detection shows it
+  stored.previewRegion = stored.imageRegion;
+  stored.previewStamp = stored.stamp;
+  stored.previewTaken = true;
+  buffer.add({stored}, true);
+  ASSERT_EQ(buffer.size(), 1U);
+
+  // The same object reported on the topic has its preview cut around its bounding box, exactly like before the stored
+  // detection was loaded. Taking the picture of the stored detection over would show a piece of the camera image which
+  // has nothing to do with the detection - a crop as big as the whole image, which is what the operator sees as a
+  // preview of the whole image instead of the detection.
+  buffer.add({makeDetection(2 * SECOND, 10.1, 655., "tracked")}, true);
+  ASSERT_EQ(buffer.size(), 1U);
+  EXPECT_FALSE(at(buffer, 0).history);
+  EXPECT_EQ(at(buffer, 0).previewStamp.nanoseconds(), 2 * SECOND);
+  EXPECT_DOUBLE_EQ(at(buffer, 0).previewRegion.x, 655.);
+  EXPECT_DOUBLE_EQ(at(buffer, 0).previewRegion.width, 40.);
+  EXPECT_DOUBLE_EQ(at(buffer, 0).previewRegion.height, 80.);
+
+  // The other way round: a stored detection which takes the place of a received one keeps the picture saved with it,
+  // not the cutout of the camera image the received detection showed.
+  auto again = stored;
+  again.stamp = rclcpp::Time(3 * SECOND, RCL_ROS_TIME);
+  buffer.add({again}, true);
+  ASSERT_EQ(buffer.size(), 1U);
+  EXPECT_TRUE(at(buffer, 0).history);
+  EXPECT_DOUBLE_EQ(at(buffer, 0).previewRegion.width, 567.);
+  EXPECT_DOUBLE_EQ(at(buffer, 0).previewRegion.height, 1026.);
+}
+
+TEST(DetectionBuffer, EachStoredDetectionShowsItsOwnCrop)
+{
+  DetectionBuffer buffer;
+  buffer.setDeduplication({1., 0., 5.});  // the same object reported again replaces the older record
+
+  auto first = makeDetection(1 * SECOND, 10., 100.);
+  first.history = true;
+  first.imagePath = "/crops/first.jpg";
+  first.imageRegion = {0., 0., 224., 963.};  // the picture saved with the record, shown as a whole
+  buffer.add({first}, true);
+  ASSERT_EQ(buffer.size(), 1U);
+  EXPECT_DOUBLE_EQ(at(buffer, 0).previewRegion.width, 224.);
+  EXPECT_DOUBLE_EQ(at(buffer, 0).previewRegion.height, 963.);
+
+  // The same person recorded again a second later replaces the older record - that is the point of the deduplication -
+  // but its saved picture is another crop of another size. The place in the older crop means nothing in the newer one,
+  // so taking the preview over would show the object somewhere else of the picture or the whole picture of it.
+  auto second = makeDetection(2 * SECOND, 10.1, 100.);
+  second.history = true;
+  second.imagePath = "/crops/second.jpg";
+  second.imageRegion = {0., 0., 413., 1143.};
+  buffer.add({second}, true);
+  ASSERT_EQ(buffer.size(), 1U);
+  EXPECT_EQ(at(buffer, 0).imagePath, "/crops/second.jpg");
+  EXPECT_DOUBLE_EQ(at(buffer, 0).previewRegion.width, 413.);
+  EXPECT_DOUBLE_EQ(at(buffer, 0).previewRegion.height, 1143.);
+
+  // A click in a camera image highlights the stored detection too, but its picture stays the crop saved with it: the
+  // clicked image is a picture of the camera as it looks now, and the place in the saved crop means nothing in it.
+  EXPECT_FALSE(buffer.retakePreview(at(buffer, 0).serial, clickedPoint("camera", 4 * SECOND, 100., 100.)));
+  EXPECT_DOUBLE_EQ(at(buffer, 0).previewRegion.width, 413.);
+  EXPECT_EQ(at(buffer, 0).previewStamp.nanoseconds(), 2 * SECOND);
+}
+
 TEST(DetectionBuffer, ReportsChangesOfItsContent)
 {
   DetectionBuffer buffer;
