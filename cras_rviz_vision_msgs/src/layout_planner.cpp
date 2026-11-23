@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <utility>
 
 namespace cras_rviz_vision_msgs {
 
@@ -30,6 +31,26 @@ double estimateLabelWidth(size_t characterCount, double fontHeight) {
   // factor was measured with the default RViz font: its lower-case letters are about a third of their height wide, and
   // the labels the display writes are short words with a few digits and spaces between them.
   return static_cast<double>(characterCount) * .35 * fontHeight;
+}
+
+std::pair<double, double> fitIntoBox(double boxWidth, double boxHeight, double aspectRatio) {
+  const auto wide = std::max(0., boxWidth);
+  // A box without a height of its own limits the picture the same way in both directions.
+  const auto high = boxHeight > 0. ? boxHeight : wide;
+  // A picture whose shape is not known is shown as a square one rather than as a line.
+  const auto ratio = aspectRatio > 0. ? aspectRatio : 1.;
+  if (wide <= 0. || high <= 0.) {
+    return {0., 0.};
+  }
+  // A picture is as wide as the box it belongs to, and only becomes narrower when it would not fit into it vertically.
+  // That is the case of a picture much taller than wide (a person standing), which would need a preview as tall as a
+  // multiple of the view otherwise.
+  const auto heightLimited = high * ratio;
+  const auto widthLimited = wide / ratio;
+  if (widthLimited <= high) {
+    return {wide, widthLimited};
+  }
+  return {heightLimited, high};
 }
 
 ScreenLayout::ScreenLayout(double viewWidth, double viewHeight, const LayoutParams& params)

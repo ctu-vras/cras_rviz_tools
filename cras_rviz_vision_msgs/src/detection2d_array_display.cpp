@@ -73,6 +73,21 @@ constexpr double MIN_MARKER_SIZE = 3.;  // [px]
 constexpr size_t previewCandidateLimit(size_t maxPreviews) {
   return 2 * maxPreviews + 8;
 }
+/**
+ * \brief Whether the texture of a preview has to be made again for the size it is going to be drawn in.
+ *
+ * The highlighted detection is drawn bigger than the other ones, and its picture would only be blown up if it kept the
+ * resolution of the smaller preview it was made with. The image cannot provide more than twice the resolution of the
+ * part of it which is shown, and that limit also stops the asking: once the texture is as sharp as the image allows,
+ * the conditions never hold again, so this does not repeat in the following frames.
+ *
+ * \param[in] wanted Width the preview is going to be drawn in [px].
+ * \param[in] drawn Width of the texture which exists for it [px].
+ * \param[in] sourceWidth Width of the part of the (cached) image which the preview shows [px].
+ */
+constexpr bool needsSharperTexture(unsigned wanted, unsigned drawn, unsigned sourceWidth) {
+  return wanted > drawn && wanted > 5u * drawn / 4u && drawn < 2u * sourceWidth;
+}
 //! Radius (in pixels) around a marker which the mouse still points at it.
 constexpr double HOVER_RADIUS = 8.;
 //! Smallest radius (in pixels) of a marker the mouse can still point at, however small the marker is drawn.
@@ -573,13 +588,22 @@ Detection2DArrayDisplay::Detection2DArrayDisplay() {
       "would be slow and unreadable.", imageCategory);
   maxPreviewsProperty_->setMin(0);
   maxPreviewsProperty_->setMax(10000);
-  previewWidthProperty_ = new rviz_common::properties::IntProperty("Preview width", 150,
-      "Width of an image preview in the view [px]. Its height follows the part of the camera image which the preview "
-      "shows, so the picture of a tall detection and of a wide one have a different shape - an image is never "
-      "stretched. The previews do not grow or shrink with the zooming, so zooming in makes room for more of them.",
+  previewWidthProperty_ = new rviz_common::properties::IntProperty("Max. preview width", 150,
+      "Maximal width of an image preview in the view [px]. A preview is never wider than this, and never taller than "
+      "the Max. preview height, whatever shape the part of the camera image it shows has - the picture only shrinks to "
+      "fit, it is never stretched. A preview of a tall detection (a person standing) is therefore narrower than this "
+      "one, because its height is what reaches the limit first. The previews do not grow or shrink with the zooming, "
+      "so zooming in makes room for more of them.",
       imageCategory);
   previewWidthProperty_->setMin(16);
-  previewWidthProperty_->setMax(1024);
+  previewWidthProperty_->setMax(4096);
+  previewHeightProperty_ = new rviz_common::properties::IntProperty("Max. preview height", 150,
+      "Maximal height of an image preview in the view [px]. Without a limit, the preview of a detection which is much "
+      "taller than wide (a person standing) would be as wide as the maximal width and many times taller, covering a "
+      "large part of the view. Set the same value as Max. preview width to keep all previews square-shaped.",
+      imageCategory);
+  previewHeightProperty_->setMin(16);
+  previewHeightProperty_->setMax(4096);
   previewPaddingProperty_ = new rviz_common::properties::FloatProperty("Preview padding", 1.2,
       "The preview shows a part of the image this much bigger than the detection bounding box. The visualization node"
       " of the detections uses the same rule (its bbox_scale parameter), so that the preview of a detection shows the"
@@ -653,6 +677,13 @@ Detection2DArrayDisplay::Detection2DArrayDisplay() {
       selectionCategory);
   highlightSizeProperty_->setMin(1.);
   highlightSizeProperty_->setMax(10.);
+  highlightPreviewProperty_ = new rviz_common::properties::FloatProperty("Preview scale", 2.5,
+      "How much bigger the image preview of a highlighted detection is than the previews of the other ones. Both the "
+      "width and the height grow, so the shape of the picture stays the same and the preview of a tall detection does "
+      "not become unreasonably tall either. Set 1 to keep the previews of the same size.",
+      selectionCategory);
+  highlightPreviewProperty_->setMin(1.);
+  highlightPreviewProperty_->setMax(5.);
   highlightColorProperty_ = new rviz_common::properties::ColorProperty("Color", QColor(0, 200, 0),
       "Colour of the frame of the highlighted image preview. The marker of a highlighted detection is drawn in that "
       "colour too, and above all the other markers.", selectionCategory);
@@ -2103,16 +2134,50 @@ std::string Detection2DArrayDisplay::previewKey(const StoredDetection& detection
   std::to_string(std::llround(detection.previewRegion.height));
 }
 
+bool Detection2DArrayDisplay::noteMissingImage(Item& item, const StoredDetection& detection) {
+  if (!detection.history) {
+    // Tell the user how far the camera images really are from the detections, so that they can tell whether the
+    // tolerance is too tight or whether no images are arriving at all.
+    const auto gap = images_->nearestGapNs(detection.previewStamp, wantedFrame(detection.cameraFrame));
+    if (gap >= 0 && (closestImageGapNs_ == 0 || gap < closestImageGapNs_)) {
+      closestImageGapNs_ = gap;
+    }
+  }
+  if (item.selected) {
+    // Tell the user why the one preview they asked for is missing (see the Selection status).
+    if (detection.history) {
+      selectedPreviewNote_ = "the picture stored with it cannot be read";
+    } else if (imageTopicName_.empty()) {
+      selectedPreviewNote_ = "the image topic is not set";
+    } else if (images_->size() == 0) {
+      selectedPreviewNote_ = "no camera image arrived on it yet";
+    } else {
+      selectedPreviewNote_ = "no image of the camera it was seen by is in the cache";
+    }
+  }
+  // The detection can still show the picture it already has, even when no image is to be found anymore.
+  return !item.material.empty();
+}
+
 void Detection2DArrayDisplay::layout(Ogre::Camera& camera, Ogre::Viewport& viewport) {
   const auto minProbability = static_cast<double>(minProbabilityProperty_->getFloat());
   const auto markerSize = static_cast<double>(markerSizeProperty_->getFloat());
   const auto fontSize = static_cast<double>(fontSizeProperty_->getFloat());
   const auto spacing = std::max(0., static_cast<double>(spacingProperty_->getFloat()));
   const auto stem = std::max(0., static_cast<double>(stemProperty_->getFloat()));
-  // The requested preview size, but never so big that a single preview would take the whole view.
-  const auto previewWidth = std::min(static_cast<double>(std::max(8,
-      previewWidthProperty_->getInt())),
-    .6 * std::min(viewport.getActualWidth(), viewport.getActualHeight()));
+  // The box a preview has to fit into. Both its width and its height are limited, so that a picture which is much
+  // taller than wide (a person standing) does not need a preview as tall as a multiple of the view, and the box is
+  // never so big that a single preview would take the whole view.
+  const auto view = std::min(static_cast<double>(viewport.getActualWidth()),
+      static_cast<double>(viewport.getActualHeight()));
+  const auto maxWidth = std::min(static_cast<double>(std::max(8, previewWidthProperty_->getInt())), .6 * view);
+  const auto maxHeight = std::min(static_cast<double>(std::max(8, previewHeightProperty_->getInt())), .6 * view);
+  const auto previewBox = std::make_pair(maxWidth, maxHeight);
+  // The preview of the detection the user highlighted is bigger than the previews of the other ones, so that they can
+  // see what they clicked on; it still has to fit into the view.
+  const auto enlarge = std::max(1., static_cast<double>(highlightPreviewProperty_->getFloat()));
+  const auto highlightBox = std::make_pair(std::min(previewBox.first * enlarge, view),
+      std::min(previewBox.second * enlarge, view));
   const auto padding = std::max(0., static_cast<double>(previewPaddingProperty_->getFloat()));
   const auto tolerance = static_cast<double>(imageToleranceProperty_->getFloat());
   // Keep the images long enough for the tolerance, plus a margin for the delay of the camera pipeline.
@@ -2336,30 +2401,8 @@ void Detection2DArrayDisplay::layout(Ogre::Camera& camera, Ogre::Viewport& viewp
           item.previewImage = images_->nearest(detection.previewStamp);
         }
       }
-      if (!item.previewImage) {
-        if (!detection.history) {
-          // Tell the user how far the camera images really are from the detections, so that they can tell whether the
-          // tolerance is too tight or whether no images are arriving at all.
-          const auto gap = images_->nearestGapNs(detection.previewStamp, wantedFrameId);
-          if (gap >= 0 && (closestImageGapNs_ == 0 || gap < closestImageGapNs_)) {
-            closestImageGapNs_ = gap;
-          }
-        }
-        if (item.selected) {
-          // Tell the user why the one preview they asked for is missing (see the Selection status).
-          if (detection.history) {
-            selectedPreviewNote_ = "the picture stored with it cannot be read";
-          } else if (imageTopicName_.empty()) {
-            selectedPreviewNote_ = "the image topic is not set";
-          } else if (images_->size() == 0) {
-            selectedPreviewNote_ = "no camera image arrived on it yet";
-          } else {
-            selectedPreviewNote_ = "no image of the camera it was seen by is in the cache";
-          }
-        }
-        if (item.material.empty()) {
-          continue;  // there is nothing to show, neither a picture nor an image to make one from
-        }
+      if (!item.previewImage && !noteMissingImage(item, detection)) {
+        continue;  // there is nothing to show, neither a picture nor an image to make one from
       }
     }
     auto region = detection.previewRegion.width > 1. && detection.previewRegion.height > 1. ?
@@ -2386,8 +2429,12 @@ void Detection2DArrayDisplay::layout(Ogre::Camera& camera, Ogre::Viewport& viewp
       item.aspectRatio = 4. / 3.;  // neither the image nor a picture of it is known
     }
     item.hasPreview = true;
-    annotation.previewWidth = previewWidth;
-    annotation.previewHeight = previewWidth / item.aspectRatio;
+    // The picture is as big as the box it belongs to allows it to be, and the detection the user highlighted has a
+    // bigger box than the other ones. The picture only gets smaller to fit into the box, it is never stretched.
+    const auto wanted = item.selected ? highlightBox : previewBox;
+    const auto shape = fitIntoBox(wanted.first, wanted.second, item.aspectRatio);
+    annotation.previewWidth = shape.first;
+    annotation.previewHeight = shape.second;
   }
 
   // Phase 3: place the annotations so that they do not overlap each other.
@@ -2501,11 +2548,14 @@ void Detection2DArrayDisplay::layout(Ogre::Camera& camera, Ogre::Viewport& viewp
     if (!item.hasPreview || !item.layout.previewPlaced) {
       continue;
     }
-    if (item.material.empty() && item.previewImage) {
+    // The picture needs a texture of the resolution it is going to be drawn in (see needsSharperTexture).
+    const auto wanted = static_cast<unsigned>(std::max(1., annotations[i].previewWidth));
+    const auto sharper = needsSharperTexture(wanted, item.textureWidth, static_cast<unsigned>(
+          std::max(0, TextureCache::sourceRect(item.previewImage, item.previewRegion).width)));
+    if (item.previewImage && (item.material.empty() || sharper)) {
       unsigned width = 0;
       unsigned height = 0;
-      item.material = textures_->getMaterial(item.previewImage, item.previewRegion,
-          static_cast<unsigned>(std::max(1., annotations[i].previewWidth)), item.textureKey, width,
+      item.material = textures_->getMaterial(item.previewImage, item.previewRegion, wanted, item.textureKey, width,
           height);
       if (width > 1 && height > 1) {
         item.textureWidth = width;

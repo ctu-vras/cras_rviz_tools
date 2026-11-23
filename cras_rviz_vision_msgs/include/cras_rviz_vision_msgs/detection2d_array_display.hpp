@@ -383,6 +383,17 @@ protected:
   //! Key of the image preview of the given detection in the texture cache.
   std::string previewKey(const StoredDetection& detection) const;
 
+  /**
+   * \brief Reports that the detection has no camera image which could be shown as its preview.
+   *
+   * Tells the user how far the camera images really are from the detections, and why the one preview they asked for is
+   * missing. Both only ever happen while the images do not fit the detections, and the message is written once per
+   * frame into the status of the display.
+   *
+   * \return False if there is nothing to show at all, neither a picture of its own nor an image to make one from.
+   */
+  bool noteMissingImage(Item& item, const StoredDetection& detection);
+
   //! Turns off the depth checking of the text, so that the labels are not hidden by the annotations at the same depth.
   static void ignoreDepth(rviz_rendering::MovableText& text);
 
@@ -481,6 +492,7 @@ protected:
   rviz_common::properties::BoolProperty* showImagesProperty_ {nullptr};
   rviz_common::properties::IntProperty* maxPreviewsProperty_ {nullptr};
   rviz_common::properties::IntProperty* previewWidthProperty_ {nullptr};
+  rviz_common::properties::IntProperty* previewHeightProperty_ {nullptr};
   rviz_common::properties::FloatProperty* previewPaddingProperty_ {nullptr};
   rviz_common::properties::FloatProperty* spacingProperty_ {nullptr};
   rviz_common::properties::StringProperty* cameraFrameProperty_ {nullptr};
@@ -494,6 +506,7 @@ protected:
   rviz_common::properties::FloatProperty* selectionToleranceProperty_ {nullptr};
   rviz_common::properties::FloatProperty* highlightProperty_ {nullptr};
   rviz_common::properties::FloatProperty* highlightSizeProperty_ {nullptr};
+  rviz_common::properties::FloatProperty* highlightPreviewProperty_ {nullptr};
   rviz_common::properties::ColorProperty* highlightColorProperty_ {nullptr};
   rviz_common::properties::RosTopicProperty* zonesTopicProperty_ {nullptr};
   rviz_common::properties::FloatProperty* inZoneLifetimeProperty_ {nullptr};

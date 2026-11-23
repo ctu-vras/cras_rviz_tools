@@ -8,8 +8,8 @@
  * When several detections are close to each other (which is common when looking at the scene from the top down),
  * drawing all their annotations would result in an unreadable pile of overlapping rectangles. The layout places the
  * most important annotations first to the freest place near their detection and leaves the rest of the detections
- * marked by their plain marker only. The previews have a fixed size in the view, so zooming in always makes room for
- * more of them.
+ * marked by their plain marker only. The previews have a limited size in the view, whatever the shape of the picture
+ * they show, so zooming in always makes room for more of them.
  */
 
 #pragma once
@@ -52,7 +52,9 @@ struct LayoutItem {
   int previousIndex {0};  //!< Order of the preview in the previous layout (0 for the first one).
   bool hovered {false};  //!< The user points at this detection; its preview has absolute priority.
   bool selected {false};  //!< The user asked to highlight this detection; its preview has the highest priority.
-  double previewWidth {0.};  //!< Size of the image preview [px]; zero width means the detection has no preview.
+  double previewWidth {0.};  //!< Width of the image preview [px]; zero width means the detection has no preview.
+  //! Height of the image preview [px]. The picture keeps the shape of the part of the camera image it shows, so both
+  //! dimensions follow from its aspect ratio and from the box the previews are limited to (see fitIntoBox).
   double previewHeight {0.};
   double stem {0.};  //!< Width of the line connecting the preview to its marker [px]; it has to stay visible.
   double labelWidth {0.};  //!< Size of the text label [px]; zero width means the detection has no label.
@@ -98,6 +100,20 @@ struct LayoutItem {
  * \return The estimated width of the label (in pixels).
  */
 double estimateLabelWidth(size_t characterCount, double fontHeight);
+
+/**
+ * \brief The size of a picture of the given aspect ratio which fits into a box of the given size.
+ *
+ * The picture keeps its shape (it is never stretched), and neither of its dimensions grows over the box it belongs to.
+ * A wide picture is therefore limited by the width of the box and a tall one (the cutout of a person standing) by its
+ * height - which is what keeps a tall detection from needing a preview many times taller than the whole view.
+ *
+ * \param[in] boxWidth Width of the box the picture has to fit into [px].
+ * \param[in] boxHeight Height of the box the picture has to fit into [px]. A non-positive height makes it a square box.
+ * \param[in] aspectRatio Width of the picture divided by its height. A non-positive value is taken for a square one.
+ * \return The width and the height of the picture [px].
+ */
+std::pair<double, double> fitIntoBox(double boxWidth, double boxHeight, double aspectRatio);
 
 //! Tuning parameters of the layout.
 struct LayoutParams {

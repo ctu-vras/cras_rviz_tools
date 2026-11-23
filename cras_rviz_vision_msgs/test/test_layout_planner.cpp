@@ -7,6 +7,7 @@
 #include <vector>
 
 using cras_rviz_vision_msgs::estimateLabelWidth;
+using cras_rviz_vision_msgs::fitIntoBox;
 using cras_rviz_vision_msgs::LayoutParams;
 using cras_rviz_vision_msgs::LayoutItem;
 using cras_rviz_vision_msgs::ScreenLayout;
@@ -451,4 +452,45 @@ TEST(EstimateLabelWidth, GrowsWithTheFontAndTheText) {
   EXPECT_GT(estimateLabelWidth(10, 20), estimateLabelWidth(10, 14));
   EXPECT_GT(estimateLabelWidth(20, 14), estimateLabelWidth(10, 14));
   EXPECT_GT(estimateLabelWidth(10, 14), 0.);
+}
+
+TEST(FitIntoBox, TallPictureIsLimitedByItsHeight) {
+  // The cutout of a person standing is much taller than wide. Making it as wide as the box would ask for a preview as
+  // tall as a multiple of the view, which is what the limit of the height prevents.
+  const auto tall = fitIntoBox(150., 150., .4);
+  EXPECT_NEAR(150., tall.second, 1e-9);
+  EXPECT_NEAR(60., tall.first, 1e-9);
+}
+
+TEST(FitIntoBox, WidePictureIsLimitedByItsWidth) {
+  const auto wide = fitIntoBox(200., 150., 2.);
+  EXPECT_NEAR(200., wide.first, 1e-9);
+  EXPECT_NEAR(100., wide.second, 1e-9);
+}
+
+TEST(FitIntoBox, KeepsTheShapeOfThePictureAndFitsIntoTheBox) {
+  for (const double ratio : {1., 4. / 3., .4, 8., .05}) {
+    for (const double width : {50., 150., 400.}) {
+      const double height = .8 * width;
+      const auto shape = fitIntoBox(width, height, ratio);
+      EXPECT_GT(shape.first, 0.);
+      EXPECT_GT(shape.second, 0.);
+      EXPECT_LE(shape.first, width + 1e-9);  // never wider than the box
+      EXPECT_LE(shape.second, height + 1e-9);  // and never taller than it
+      EXPECT_NEAR(ratio, shape.first / shape.second, 1e-9);  // and never stretched
+      // The picture is as big as the box allows, i.e. it reaches the limit which comes first.
+      EXPECT_GE(std::max(shape.first, shape.second), std::min(width, height) - 1e-9);
+    }
+  }
+}
+
+TEST(FitIntoBox, UnknownShapeIsSquareAndAnEmptyBoxHasNoPicture) {
+  const auto square = fitIntoBox(150., 150., 0.);
+  EXPECT_NEAR(square.first, square.second, 1e-9);
+  EXPECT_NEAR(150., square.first, 1e-9);
+  // A box which does not limit the height of its own limits it the same way as the width.
+  EXPECT_NEAR(fitIntoBox(120., 120., 2.).first, fitIntoBox(120., 0., 2.).first, 1e-9);
+  EXPECT_NEAR(fitIntoBox(120., 120., 2.).second, fitIntoBox(120., -1., 2.).second, 1e-9);
+  EXPECT_DOUBLE_EQ(0., fitIntoBox(0., 100., 1.).first);
+  EXPECT_DOUBLE_EQ(0., fitIntoBox(0., 100., 1.).second);
 }

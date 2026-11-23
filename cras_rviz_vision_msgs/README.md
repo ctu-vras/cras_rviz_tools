@@ -54,9 +54,13 @@ detection whose box reaches over the border of the image is moved inside of the 
 object keeps its place in the middle of its picture - which is also the rule the crops of the `detection_visualizer`
 node follow, see [Selecting a detection](#selecting-a-detection).
 
-The previews all have the same size in the view (*Image previews/Preview width*), so the space they take does not
-depend on how far the detections are, and showing a preview of every detection would quickly cover the whole view. The
-display therefore adapts to the space available in the view:
+The previews have a limited size in the view, whatever the shape of the picture they show, so the space they take does
+not depend on how far the detections are, and showing a preview of every detection would quickly cover the whole view.
+A preview is never wider than *Image previews/Max. preview width* and never taller than *Image previews/Max. preview
+height*; the picture is as big as that box allows and keeps its shape, so the cutout of a person standing (taller than
+wide) is narrower than the box, while a wide picture fills it. Only the detection the user highlights is allowed a
+bigger picture, see [Selecting a detection](#selecting-a-detection). The display adapts to the space available in the
+view:
 
 - The previews and the labels are placed by a layout which looks for the closest free place around each detection and
   never lets two of them overlap. The marker of a detection is drawn in any case and never blocks a label, so a dense
@@ -82,6 +86,9 @@ Clicking a detection - either a marker or an image preview in the view of the di
 shown by another part of the interface - highlights it:
 
 - its sphere is drawn bigger (*Selection/Marker scale*), in *Selection/Color*, and over all the other markers,
+- its image preview is bigger than the previews of the other detections (*Selection/Preview scale*, 2.5 by default); the
+  box the picture is limited to grows for it in both directions, so its shape stays the same and the preview of a tall
+  detection does not grow out of the view either,
 - its image preview has the absolute priority in showing a picture for *Selection/Highlight* seconds (30 by default):
   it is the first detection to be offered a place in the layout, it is given one even when the view has no room free
   for it (its picture is then drawn over the previews which are in its way), it is drawn last so that nothing can cover
@@ -209,7 +216,8 @@ number of such detections and the frame they are stuck in is reported in the sta
 | *Labels/Max. labels* | Maximal number of labels shown at once; the most important detections are labelled first. |
 | *Image previews/Show image previews* | Whether the detections can be shown with an image preview. |
 | *Image previews/Max. images* | Maximal number of detections shown with a preview; each of them needs a texture. |
-| *Image previews/Preview width* | Width of a preview in the view [px]; the previews always have this size, so zooming changes how many of them fit. |
+| *Image previews/Max. preview width* | Maximal width of a preview in the view [px]; zooming changes how many of them fit. |
+| *Image previews/Max. preview height* | Maximal height of a preview in the view [px], so that a detection much taller than wide does not need a preview many times taller than the view. |
 | *Image previews/Preview padding* | The picture of a detection shows its bounding box made this many times bigger. The `bbox_scale` parameter of the `detection_visualizer` node means the same and has the same default, so that a preview shows the very cutout the operator clicked on in the visualization strip. |
 | *Image previews/Spacing* | Minimal spacing between two annotations [px]. |
 | *Image previews/Hover delay* | How long the mouse has to point at a detection to raise its preview to the top [s]. |
@@ -218,6 +226,7 @@ number of such detections and the frame they are stuck in is reported in the sta
 | *Selection/Image time tolerance* | Maximal time difference between a detection and the clicked image for it to be selected [s]. |
 | *Selection/Highlight* | How long a clicked detection stays highlighted [s]. Clicking it again starts the time again. |
 | *Selection/Marker scale* | How much bigger the marker of a highlighted detection is. |
+| *Selection/Preview scale* | How much bigger the picture of a highlighted detection is than the other previews; both its width and its height grow, so its shape stays the same. |
 | *Selection/Color* | Colour of the frame of the highlighted preview and of its marker. |
 | *Persistent history/Show history* | Whether the detections read from the persistent storage are shown together with the received ones. |
 | *Persistent history/Storage folder* | Folder with the stored detections. Defaults to `$ROS_HOME/g4s_mission`, a leading `~` is expanded. |
