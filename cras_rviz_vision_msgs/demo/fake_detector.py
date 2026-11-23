@@ -18,7 +18,22 @@ With the `sim` option, the detector also publishes the `/clock` topic and stamps
 `SIM_SHIFT` seconds, which shows that the display works with the simulation time (run RViz with
 `--ros-args -p use_sim_time:=true` to try it).
 
-Usage: fake_detector.py [number_of_detections] [cluster] [sparse] [compressed] [empty] [sim] [duration_s]
+The `wide` option spreads the detections tens of metres apart instead of a few metres, which is the case when a lot
+of image previews fit into the view at once.
+
+The `extframe` option publishes the detections in the `camera` frame instead of `map`, so that the display has to
+transform them (a static transform from `map` to `camera` has to be published for them to show up), and `noimage`
+prevents the images from being published at all.
+
+The `mask` option publishes a segmentation of the scene on `/mask`, where the pixels of the i-th detection of a message
+carry the value `i + 1`. The `detection_visualizer` node of the g4s_mission package then replaces only the pixels of the
+object when the object is detected again (`mask_topic` parameter), and keeps the older picture around it.
+
+The `zones` option publishes a keep-out zone over a corner of the scene on the `polygons` topic, so that the detections
+which fall into it can be seen coloured (and let expire after a different time) than the ones outside.
+
+Usage: fake_detector.py [number_of_detections] [cluster] [sparse] [wide] [extframe] [noimage] [compressed]
+       [empty] [sim] [mask] [zones] [duration_s]
 """
 import math
 import sys
@@ -28,7 +43,9 @@ import numpy as np
 import rclpy
 
 from builtin_interfaces.msg import Time
+from polygon_msgs.msg import Point2D, Polygon2D, Polygon2DCollection
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import CompressedImage, Image
 from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
@@ -46,22 +63,36 @@ SIM_SHIFT = 100000.
 
 class FakeDetector(Node):
 
-    def __init__(self, count, cluster, sparse, compressed, empty, sim):
+    def __init__(self, count, cluster, sparse, wide, extframe, noimage, compressed, empty, sim,
+                 mask, zones):
         super().__init__('fake_detector')
         self.count = count
         self.cluster = cluster
         self.sparse = sparse
+        self.wide = wide
+        self.extframe = extframe
+        self.noimage = noimage
         self.compressed = compressed
         self.empty = empty
         self.sim = sim
+        self.mask = mask
         self.round = 0
+        if zones:
+            # The zones are drawn once and stay, so they are published with the latched quality of service.
+            self.zones = self.create_publisher(Polygon2DCollection, 'polygons', QoSProfile(
+                depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.detections = self.create_publisher(Detection2DArray, '/detections', 10)
         self.image = self.create_publisher(Image, '/image', 10)
+        self.mask_image = self.create_publisher(Image, '/mask', 10)
         self.compressed_image = self.create_publisher(CompressedImage, '/image/compressed', 10)
-        self.image_timer = self.create_timer(0.05, self.publish_image)
+        if not self.noimage:
+            self.image_timer = self.create_timer(0.05, self.publish_image)
         self.detection_timer = self.create_timer(0.2, self.publish_detections)
         if self.sim:
             self.clock = self.create_publisher(Clock, '/clock', 10)
+        if zones:
+            self.publish_zones()
         self.image_stamp = None
         if self.compressed:
             import cv2  # noqa: F401  N813  The compressed images are only made when this option is used.
@@ -72,11 +103,12 @@ class FakeDetector(Node):
         # The detections are spread over a bounded grid of places, so that the ones published with new IDs (and
         # therefore kept in addition to the older ones) stay in the same area of the scene and can be seen.
         place = index % max(1, self.count)
+        step = 20. if self.wide else .6
         if self.cluster:
             angle = 2.0 * math.pi * place / max(1, self.count)
             return .6 * math.cos(angle), .6 * math.sin(angle)
         rows = max(1, int(math.ceil(math.sqrt(max(1, self.count)))))
-        return .6 * (place % rows - .5 * rows), .6 * (place // rows - .5 * rows)
+        return step * (place % rows - .5 * rows), step * (place // rows - .5 * rows)
 
     def pixel_positions(self, i):
         """Position of the i-th detection in the image, in pixels."""
@@ -101,10 +133,23 @@ class FakeDetector(Node):
         canvas[:, :, 1] = 40
         # Draw a coloured block at the position of every detection bounding box, so that the image previews
         # attached to the detections can be told apart.
+        segmentation = np.zeros((IMAGE_HEIGHT, IMAGE_WIDTH), dtype=np.uint8)
         for i in range(min(self.count, 18)):
             x, y = self.pixel_positions(i)
             color = ((30 + 20 * i) % 256, (220 - 15 * i) % 256, (90 + 25 * i) % 256)
             canvas[int(y - 40):int(y + 40), int(x - 45):int(x + 45)] = color
+            # The segmentation of the same scene marks the pixels of the i-th detection of a message by i + 1.
+            segmentation[int(y - 40):int(y + 40), int(x - 45):int(x + 45)] = i + 1
+        if self.mask:
+            message = Image()
+            message.header.stamp = now
+            message.header.frame_id = 'camera'
+            message.height = IMAGE_HEIGHT
+            message.width = IMAGE_WIDTH
+            message.encoding = 'mono8'
+            message.step = IMAGE_WIDTH
+            message.data = segmentation.tobytes()
+            self.mask_image.publish(message)
         if self.compressed:
             message = CompressedImage()
             message.header.stamp = now
@@ -123,6 +168,19 @@ class FakeDetector(Node):
             message.data = canvas.tobytes()
             self.image.publish(message)
 
+    def publish_zones(self):
+        """Publish a keep-out zone over a corner of the scene, once and for all."""
+        message = Polygon2DCollection()
+        message.header.frame_id = 'map'
+        message.header.stamp = self.get_clock().now().to_msg()
+        zone = Polygon2D()
+        # The detections of the grid stand .6 m apart around the origin, so a zone of this size covers a part of them
+        # and leaves the others out of it - which is what the two lifetimes of the display are good for.
+        for x, y in ((-1.3, -1.3), (-.5, -1.3), (-.5, -.5), (-1.3, -.5)):
+            zone.points.append(Point2D(x=x, y=y))
+        message.polygons.append(zone)
+        self.zones.publish(message)
+
     def published(self):
         """Indices of the detections the next message contains."""
         self.round += 1
@@ -137,7 +195,8 @@ class FakeDetector(Node):
     def publish_detections(self):
         message = Detection2DArray()
         message.header.stamp = self.image_stamp or self.now()
-        message.header.frame_id = 'map'
+        # The detections of a real detector come in a sensor or odometry frame, which the display has to transform.
+        message.header.frame_id = 'camera' if self.extframe else 'map'
         for index in self.published():
             x, y = self.positions(index)
             detection = Detection2D()
@@ -166,13 +225,19 @@ def main():
     count = int(sys.argv[1]) if len(sys.argv) > 1 else 12
     options = sys.argv[2:]
     sparse = 'sparse' in options
+    wide = 'wide' in options
+    extframe = 'extframe' in options
+    noimage = 'noimage' in options
     compressed = 'compressed' in options
     empty = 'empty' in options
     sim = 'sim' in options
+    mask = 'mask' in options
+    zones = 'zones' in options
     numbers = [arg for arg in options if arg.isdigit()]
     deadline = time.time() + float(numbers[0]) if numbers else None
     rclpy.init()
-    node = FakeDetector(count, 'cluster' in options, sparse, compressed, empty, sim)
+    node = FakeDetector(count, 'cluster' in options, sparse, wide, extframe, noimage, compressed,
+                        empty, sim, mask, zones)
     try:
         while rclpy.ok() and (deadline is None or time.time() < deadline):
             rclpy.spin_once(node, timeout_sec=.1)

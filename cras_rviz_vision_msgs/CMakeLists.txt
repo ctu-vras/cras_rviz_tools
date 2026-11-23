@@ -17,10 +17,12 @@ find_package(geometry_msgs REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
 find_package(pluginlib REQUIRED)
+find_package(polygon_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rviz_common REQUIRED)
 find_package(rviz_rendering REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(vision_msgs REQUIRED)
 
 add_library(${PROJECT_NAME}_plugin SHARED
@@ -29,12 +31,14 @@ add_library(${PROJECT_NAME}_plugin SHARED
   src/detection_store.cpp
   src/image_cache.cpp
   src/image_topic_property.cpp
+  src/keepout_zones.cpp
   src/layout_planner.cpp
   include/cras_rviz_vision_msgs/detection2d_array_display.hpp
   include/cras_rviz_vision_msgs/detection_buffer.hpp
   include/cras_rviz_vision_msgs/detection_store.hpp
   include/cras_rviz_vision_msgs/image_cache.hpp
   include/cras_rviz_vision_msgs/image_topic_property.hpp
+  include/cras_rviz_vision_msgs/keepout_zones.hpp
   include/cras_rviz_vision_msgs/layout_planner.hpp
 )
 target_include_directories(${PROJECT_NAME}_plugin PRIVATE include ${OpenCV_INCLUDE_DIRS})
@@ -48,7 +52,9 @@ target_link_libraries(${PROJECT_NAME}_plugin
     rviz_common::rviz_common
     rviz_rendering::rviz_rendering
     ${geometry_msgs_TARGETS}
+    ${polygon_msgs_TARGETS}
     ${sensor_msgs_TARGETS}
+    ${std_msgs_TARGETS}
     ${vision_msgs_TARGETS}
     ${OpenCV_LIBRARIES}
 )
@@ -64,10 +70,12 @@ ament_export_dependencies(
   geometry_msgs
   image_transport
   pluginlib
+  polygon_msgs
   rclcpp
   rviz_common
   rviz_rendering
   sensor_msgs
+  std_msgs
   vision_msgs
 )
 pluginlib_export_plugin_description_file(rviz_common plugin_description.xml)
@@ -84,6 +92,11 @@ if(BUILD_TESTING)
   ament_add_gtest(${PROJECT_NAME}_test_layout_planner test/test_layout_planner.cpp src/layout_planner.cpp)
   if(TARGET ${PROJECT_NAME}_test_layout_planner)
     target_include_directories(${PROJECT_NAME}_test_layout_planner PRIVATE include)
+  endif()
+
+  ament_add_gtest(${PROJECT_NAME}_test_keepout_zones test/test_keepout_zones.cpp src/keepout_zones.cpp)
+  if(TARGET ${PROJECT_NAME}_test_keepout_zones)
+    target_include_directories(${PROJECT_NAME}_test_keepout_zones PRIVATE include)
   endif()
 
   ament_add_gtest(${PROJECT_NAME}_test_detection_store test/test_detection_store.cpp src/detection_store.cpp)

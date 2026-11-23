@@ -93,6 +93,61 @@ TEST(ImageCache, FindsTheClosestImage)
   EXPECT_FALSE(cache.has(rclcpp::Time(3000000000), 0.01));
 }
 
+TEST(ImageRegion, PaddingShowsTheSameCutoutAsTheVisualizationNodeOfTheDetections)
+{
+  const auto box = cras_rviz_vision_msgs::ImageRegion {20., 10., 60., 50.};
+  // The picture of an object is its bounding box made the given factor bigger, i.e. here a tenth of its size of the
+  // surroundings on every side. The visualization node of the detections crops the same part of the same picture out
+  // (its bbox_scale parameter, with the same default) and the user click in that picture, so the two have to understand
+  // the number in the same way - otherwise the preview of a clicked detection shows something else than what was
+  // clicked, which is what the operator notices as a wrong cutout.
+  const auto shown = box.padded(1.2);
+  EXPECT_DOUBLE_EQ(shown.x, 14.);
+  EXPECT_DOUBLE_EQ(shown.y, 5.);
+  EXPECT_DOUBLE_EQ(shown.width, 72.);
+  EXPECT_DOUBLE_EQ(shown.height, 60.);
+  EXPECT_DOUBLE_EQ(box.padded(1.).width, 60.);  // without any surroundings, the bounding box alone
+}
+
+TEST(TextureCache, ShownPartIsMovedInsideOfTheImageInsteadOfBeingCutThere)
+{
+  cras_rviz_vision_msgs::ImageCache cache;
+  cache.add(makeImage(1000000000, 200, 100), 0);
+  const auto image = cache.get(rclcpp::Time(1000000000), 1.);
+  ASSERT_TRUE(static_cast<bool>(image));
+
+  // A detection at the border of the image and the surroundings around it: what does not fit beside the box has to be
+  // taken on its other side, so that the shown part keeps the size the padding asks for and the object stays in the
+  // middle of it. Cutting the region at the border instead would show a different cutout than the tile of the same
+  // detection in the visualization strip, which is what the user clicks on.
+  const auto shown = cras_rviz_vision_msgs::TextureCache::sourceRect(image,
+      cras_rviz_vision_msgs::ImageRegion{-10., -10., 72., 60.});
+  EXPECT_EQ(shown.x, 0);
+  EXPECT_EQ(shown.y, 0);
+  EXPECT_EQ(shown.width, 72);
+  EXPECT_EQ(shown.height, 60);
+}
+
+TEST(ImageCache, NearestImageIsFoundWhateverItsAge)
+{
+  cras_rviz_vision_msgs::ImageCache cache;
+
+  auto left = makeImage(1000000000);
+  left->header.frame_id = "left_camera";
+  cache.add(left, 0);
+  auto right = makeImage(2000000000);
+  right->header.frame_id = "right_camera";
+  cache.add(right, 0);
+
+  // No tolerance to give here - the picture of the detection the user highlighted is the closest one there is, however
+  // old it is, and of the camera the detection was seen by.
+  EXPECT_EQ(cache.nearest(rclcpp::Time(900000000)).stamp.nanoseconds(), 1000000000);
+  EXPECT_EQ(cache.nearest(rclcpp::Time(1100000000)).stamp.nanoseconds(), 1000000000);
+  EXPECT_EQ(cache.nearest(rclcpp::Time(3000000000), "left_camera").stamp.nanoseconds(), 1000000000);
+  EXPECT_EQ(cache.nearest(rclcpp::Time(1500000000), "right_camera").stamp.nanoseconds(), 2000000000);
+  EXPECT_FALSE(static_cast<bool>(cache.nearest(rclcpp::Time(1500000000), "back_camera")));
+}
+
 TEST(ImageCache, KeepsOnlyTheNewestImages)
 {
   cras_rviz_vision_msgs::ImageCache cache(2);
@@ -125,6 +180,30 @@ TEST(ImageCache, ScalesDownLargeImages)
   EXPECT_EQ(image.image->image.cols, 640);
   EXPECT_EQ(image.image->image.rows, 360);
   EXPECT_DOUBLE_EQ(image.scale, .5);
+}
+
+TEST(ImageCache, TellsWhichPartOfTheImageAPreviewShows)
+{
+  cras_rviz_vision_msgs::ImageCache cache;
+  const auto stamp = cache.add(makeImage(1000000000, 1280, 720), 640);  // the image is kept in half the resolution
+  const auto image = cache.get(stamp, 0.1);
+  ASSERT_TRUE(static_cast<bool>(image));
+  ASSERT_DOUBLE_EQ(image.scale, .5);
+
+  // The whole image when no part of it is asked for.
+  EXPECT_EQ(cras_rviz_vision_msgs::TextureCache::sourceRect(image, {}), cv::Rect(0, 0, 640, 360));
+  // A part of it, in the resolution in which the image is really kept.
+  EXPECT_EQ(cras_rviz_vision_msgs::TextureCache::sourceRect(image, {100., 200., 40., 80.}), cv::Rect(50, 100, 20, 40));
+  // What reaches outside of the image is not cut away - the shown part is moved inside of the image, keeping the shape
+  // the region asks for, so that a detection at the border is shown in the same cutout as the same detection in the
+  // middle of the image (and as its picture in the visualization strip, which moves its crops the same way).
+  EXPECT_EQ(cras_rviz_vision_msgs::TextureCache::sourceRect(image, {1200., 200., 200., 200.}),
+      cv::Rect(540, 100, 100, 100));
+  // A region bigger than the image itself has to become as big as the image is.
+  EXPECT_EQ(cras_rviz_vision_msgs::TextureCache::sourceRect(image, {-1000., -1000., 4000., 4000.}),
+      cv::Rect(0, 0, 640, 360));
+  EXPECT_EQ(cras_rviz_vision_msgs::TextureCache::sourceRect(cras_rviz_vision_msgs::CameraImage(),
+      {1., 2., 3., 4.}), cv::Rect());
 }
 
 TEST(ImageCache, KeepsSmallImagesUnscaled)

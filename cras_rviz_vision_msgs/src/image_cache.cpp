@@ -24,6 +24,8 @@
 #include <rclcpp/logging.hpp>
 #include <sensor_msgs/image_encodings.hpp>
 
+#include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
 namespace cras_rviz_vision_msgs {
@@ -61,6 +63,10 @@ rclcpp::Time ImageCache::add(const sensor_msgs::msg::Image::ConstSharedPtr& imag
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
+  const auto frameId = image->header.frame_id;
+  auto& source = sources_[frameId];
+  source.encoding = image->encoding;
+  ++source.received;
   lastEncoding_ = image->encoding;
   lastError_.clear();
 
@@ -69,7 +75,7 @@ rclcpp::Time ImageCache::add(const sensor_msgs::msg::Image::ConstSharedPtr& imag
     // Store the data in a format that can be uploaded to a texture without further conversions.
     cvImage = cv_bridge::toCvCopy(image, targetEncoding(image->encoding));
   } catch (const std::exception& e) {
-    failed(image->encoding, e.what());
+    failed(frameId, image->encoding, e.what());
     return {0, 0};
   }
 
@@ -82,6 +88,10 @@ rclcpp::Time ImageCache::add(const sensor_msgs::msg::CompressedImage::ConstShare
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
+  const auto frameId = image->header.frame_id;
+  auto& source = sources_[frameId];
+  source.encoding = image->format;
+  ++source.received;
   lastEncoding_ = image->format;
   lastError_.clear();
 
@@ -90,11 +100,34 @@ rclcpp::Time ImageCache::add(const sensor_msgs::msg::CompressedImage::ConstShare
   const auto separator = image->format.find(';');
   const auto decoded = separator == std::string::npos ? image->format : image->format.substr(0, separator);
 
+  // JPEG can decode the image directly in a reduced size, which is much cheaper than decoding it in full and scaling
+  // it down afterwards - and the previews are never shown in the original resolution. The reduction factor is picked
+  // from the size of the previous image of the same camera (a camera does not change its resolution), so that the first
+  // image is still decoded in full and the following ones are decoded about as big as they are needed.
+  // Each camera has its own reduction factor, because each of them has its own resolution.
   cv_bridge::CvImageConstPtr cvImage;
+  auto factor = 1;
+  const auto sourceWidth = sourceWidths_.count(frameId) ? sourceWidths_.at(frameId) : 0;
+  if (maxImageSize > 0 && sourceWidth > 0) {
+    while (factor < 8 && sourceWidth > int64_t {2 * factor} *static_cast<int64_t>(maxImageSize)) {
+      factor *= 2;
+    }
+  }
   try {
-    cvImage = cv_bridge::toCvCopy(image, targetEncoding(decoded));
+    const cv::Mat blob(1, static_cast<int>(image->data.size()), CV_8UC1,
+        const_cast<uint8_t*>(image->data.data()));  // NOLINT: imdecode only reads the data
+    // The flags of the reduced decoding differ for every factor, so look the right one up in the table.
+    static constexpr int REDUCED_FLAGS[] = {cv::IMREAD_COLOR, cv::IMREAD_REDUCED_COLOR_2,
+      cv::IMREAD_REDUCED_COLOR_4, cv::IMREAD_REDUCED_COLOR_8};
+    auto pixels = cv::imdecode(blob, REDUCED_FLAGS[factor == 1 ? 0 : (factor == 2 ? 1 : (factor == 4 ? 2 : 3))]);
+    if (pixels.empty()) {
+      throw std::runtime_error("the image could not be decoded");
+    }
+    sourceWidths_[frameId] = static_cast<int64_t>(pixels.cols) * factor;
+    cvImage = cv_bridge::cvtColor(std::make_shared<const cv_bridge::CvImage>(
+      cv_bridge::CvImage(image->header, "bgr8", std::move(pixels))), targetEncoding(decoded));
   } catch (const std::exception& e) {
-    failed(image->format, e.what());
+    failed(frameId, image->format, e.what());
     return {0, 0};
   }
 
@@ -114,6 +147,8 @@ rclcpp::Time ImageCache::store(const cv_bridge::CvImageConstPtr& image, const rc
   const auto height = static_cast<size_t>(stored.image.rows);
   CameraImage entry;
   entry.stamp = stamp;
+  entry.frameId = image->header.frame_id;
+  sourceWidths_.insert({entry.frameId, static_cast<int64_t>(width)});
   if (maxImageSize > 0 && std::max(width, height) > maxImageSize) {
     entry.scale = static_cast<double>(maxImageSize) / static_cast<double>(std::max(width, height));
     cv::resize(stored.image, stored.image, cv::Size(), entry.scale, entry.scale, cv::INTER_AREA);
@@ -124,12 +159,22 @@ rclcpp::Time ImageCache::store(const cv_bridge::CvImageConstPtr& image, const rc
   while (images_.size() > maxImages_) {
     images_.pop_front();
   }
+  // The detections are usually stamped by the moment the camera took the image, while the image itself arrives later.
+  // The cache therefore has to keep the images for a while, not just a few of them.
+  if (keepDurationNs_ > 0) {
+    const auto oldest = images_.back().stamp.nanoseconds() - keepDurationNs_;
+    while (images_.size() > 4 && images_.front().stamp.nanoseconds() < oldest) {
+      images_.pop_front();
+    }
+  }
 
   return images_.back().stamp;
 }
 
-void ImageCache::failed(const std::string& encoding, const std::string& what) {
+void ImageCache::failed(const std::string& frameId, const std::string& encoding, const std::string& what) {
   lastError_ = "Could not convert image with format \"" + encoding + "\": " + what;
+  // Remember it for the camera, so that the status can say which of them is broken while the others work.
+  sources_[frameId].error = what;
   if (failedEncodings_.insert(encoding).second) {
     // Log this only once per encoding, the image topic may be republished at high rates.
     RCLCPP_WARN_STREAM(
@@ -138,21 +183,71 @@ void ImageCache::failed(const std::string& encoding, const std::string& what) {
   }
 }
 
-CameraImage ImageCache::get(const rclcpp::Time& stamp, double tolerance) const{
+CameraImage ImageCache::get(const rclcpp::Time& stamp, double tolerance, const std::string& frameId) const{
   if (tolerance < 0.) {
     return {};
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  const auto index = findIndex(stamp, static_cast<int64_t>(tolerance * 1e9));
+  const auto index = findIndex(stamp, static_cast<int64_t>(tolerance * 1e9), frameId);
   return index < 0 ? CameraImage{} : images_[static_cast<size_t>(index)];
 }
 
-bool ImageCache::has(const rclcpp::Time& stamp, double tolerance) const{
+CameraImage ImageCache::nearest(const rclcpp::Time& stamp, const std::string& frameId) const{
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto index = findIndex(stamp, std::numeric_limits<int64_t>::max(), frameId);
+  return index < 0 ? CameraImage{} : images_[static_cast<size_t>(index)];
+}
+
+int64_t ImageCache::nearestGapNs(const rclcpp::Time& stamp, const std::string& frameId) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  int64_t best = -1;
+  for (const auto& image : images_) {
+    if (!frameId.empty() && image.frameId != frameId) {
+      continue;
+    }
+    const auto gap = std::abs(image.stamp.nanoseconds() - stamp.nanoseconds());
+    if (best < 0 || gap < best) {
+      best = gap;
+    }
+  }
+  return best;
+}
+
+bool ImageCache::has(const rclcpp::Time& stamp, double tolerance, const std::string& frameId) const{
   if (tolerance < 0.) {
     return false;
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  return findIndex(stamp, static_cast<int64_t>(tolerance * 1e9)) >= 0;
+  return findIndex(stamp, static_cast<int64_t>(tolerance * 1e9), frameId) >= 0;
+}
+
+std::vector<ImageCache::Source> ImageCache::sources() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto result = sources_;
+  for (const auto& image : images_) {
+    ++result[image.frameId].images;
+  }
+  std::vector<Source> list;
+  list.reserve(result.size());
+  for (auto& entry : result) {
+    entry.second.frameId = entry.first;
+    list.push_back(entry.second);
+  }
+  return list;
+}
+
+size_t ImageCache::count(const std::string& frameId) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (frameId.empty()) {
+    return images_.size();
+  }
+  size_t num = 0;
+  for (const auto& image : images_) {
+    if (image.frameId == frameId) {
+      ++num;
+    }
+  }
+  return num;
 }
 
 std::string ImageCache::lastEncoding() const{
@@ -171,6 +266,11 @@ void ImageCache::setMaxImages(size_t maxImages) {
   while (images_.size() > maxImages_) {
     images_.pop_front();
   }
+}
+
+void ImageCache::setKeepDuration(double seconds) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  keepDurationNs_ = seconds > 0. ? static_cast<int64_t>(seconds * 1e9) : 0;
 }
 
 void ImageCache::clear() {
@@ -193,11 +293,15 @@ std::string ImageCache::targetEncoding(const std::string& encoding) {
   return sensor_msgs::image_encodings::BGR8;
 }
 
-int ImageCache::findIndex(const rclcpp::Time& stamp, int64_t toleranceNs) const{
+int ImageCache::findIndex(const rclcpp::Time& stamp, int64_t toleranceNs, const std::string& frameId) const{
   int best = -1;
   int64_t bestDiff = std::numeric_limits<int64_t>::max();
   const int64_t wanted = stamp.nanoseconds();
   for (size_t i = 0; i < images_.size(); ++i) {
+    // The images of a different camera are never the image of the detection, no matter how well their stamps match.
+    if (!frameId.empty() && images_[i].frameId != frameId) {
+      continue;
+    }
     const int64_t diff = std::abs(images_[i].stamp.nanoseconds() - wanted);
     if (diff <= toleranceNs && diff < bestDiff) {
       bestDiff = diff;
@@ -207,8 +311,9 @@ int ImageCache::findIndex(const rclcpp::Time& stamp, int64_t toleranceNs) const{
   return best;
 }
 
-TextureCache::TextureCache(size_t maxTextures)
-    : maxTextures_(std::max(size_t{1}, maxTextures)) {
+TextureCache::TextureCache(size_t maxTextures, std::string namePrefix)
+    : namePrefix_(namePrefix.empty() ? "cras_rviz_vision_msgs" : std::move(namePrefix)),
+      maxTextures_(std::max(size_t{1}, maxTextures)) {
 }
 
 TextureCache::~TextureCache() {
@@ -232,17 +337,9 @@ std::string TextureCache::getMaterial(const CameraImage& image, const ImageRegio
   auto& entry = entries_[key];
   entry.lastUse = usageCounter_;
 
-  // The previews are shown in a much smaller resolution than the original image, so work with the stored (scaled)
-  // image and scale the requested region accordingly. An empty region means to show the whole image.
   const auto scale = image.scale;
   const auto& whole = image.image->image;
-  auto source = region.width > 0. && region.height > 0. ? cv::Rect(
-      std::max(0, static_cast<int>(std::round(region.x * scale))),
-      std::max(0, static_cast<int>(std::round(region.y * scale))),
-      std::max(1, static_cast<int>(std::round(region.width * scale))),
-      std::max(1, static_cast<int>(std::round(region.height * scale)))) :
-                  cv::Rect(0, 0, whole.cols, whole.rows);
-  source &= cv::Rect(0, 0, whole.cols, whole.rows);
+  const auto source = sourceRect(image, region);
   if (source.width < 1 || source.height < 1) {
     retiredEntries_.push_back(entry);
     entries_.erase(key);
@@ -279,7 +376,7 @@ std::string TextureCache::getMaterial(const CameraImage& image, const ImageRegio
     retiredEntries_.push_back(entry);
   }
   const auto id = ++textureCounter_;
-  entry.name = "cras_rviz_vision_msgs_texture_" + std::to_string(id);
+  entry.name = namePrefix_ + "_texture_" + std::to_string(id);
   entry.stamp = image.stamp;
   entry.region = region;
   entry.imageScale = scale;
@@ -292,6 +389,53 @@ std::string TextureCache::getMaterial(const CameraImage& image, const ImageRegio
   width = textureWidth;
   height = textureHeight;
   return entry.materialName;
+}
+
+cv::Rect TextureCache::sourceRect(const CameraImage& image, const ImageRegion& region) {
+  if (!image) {
+    return {};
+  }
+  // The previews are shown in a much smaller resolution than the original image, so the image is kept reduced and the
+  // requested region has to be scaled accordingly. An empty region means to show the whole image.
+  const auto& whole = image.image->image;
+  if (!(region.width > 0.) || !(region.height > 0.)) {
+    return cv::Rect {0, 0, whole.cols, whole.rows};
+  }
+  auto wanted = cv::Rect {static_cast<int>(std::round(region.x * image.scale)),
+    static_cast<int>(std::round(region.y * image.scale)),
+    std::max(1, static_cast<int>(std::round(region.width * image.scale))),
+    std::max(1, static_cast<int>(std::round(region.height * image.scale)))};
+  // What reaches outside of the image is not cut away - the shown part is moved inside of the image instead, so that
+  // the detection keeps the place it has in the middle of its picture and the preview shows the same cutout as the
+  // visualization strip of the same detections, which moves its crops the same way. Only a part which is bigger than
+  // the image itself has to become smaller.
+  wanted.width = std::min(wanted.width, whole.cols);
+  wanted.height = std::min(wanted.height, whole.rows);
+  wanted.x = std::max(0, std::min(wanted.x, whole.cols - wanted.width));
+  wanted.y = std::max(0, std::min(wanted.y, whole.rows - wanted.height));
+  return wanted;
+}
+
+std::string TextureCache::peekMaterial(const std::string& key, unsigned* width, unsigned* height) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto entry = entries_.find(key);
+  if (entry == entries_.end() || entry->second.materialName.empty()) {
+    return {};
+  }
+  entry->second.lastUse = usageCounter_;
+  if (width) {
+    *width = entry->second.width;
+  }
+  if (height) {
+    *height = entry->second.height;
+  }
+  return entry->second.materialName;
+}
+
+void TextureCache::setLimit(size_t maxTextures) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  maxTextures_ = std::max(size_t{1}, maxTextures);
+  enforceLimitsLocked();
 }
 
 void TextureCache::release(const std::string& key) {
@@ -335,8 +479,10 @@ void TextureCache::enforceLimitsLocked() {
   }
 }
 
-std::string TextureCache::createMaterial(const std::string& textureName, unsigned id) {
-  const auto name = "cras_rviz_vision_msgs_material_" + std::to_string(id);
+std::string TextureCache::createMaterial(const std::string& textureName, unsigned id) const {
+  // The names of the rendering resources are shared by the whole process, so they have to tell the RViz instance and
+  // the display instance they belong to.
+  const auto name = namePrefix_ + "_material_" + std::to_string(id);
   const auto material = Ogre::MaterialManager::getSingleton().create(name,
       Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME);
   material->setLightingEnabled(false);
@@ -346,6 +492,11 @@ std::string TextureCache::createMaterial(const std::string& textureName, unsigne
   auto* pass = material->getTechnique(0)->getPass(0);
   auto* textureUnit = pass->createTextureUnitState(textureName);
   textureUnit->setTextureFiltering(Ogre::TFO_BILINEAR);
+  // The alpha of a preview comes from the colour of its vertices (the images themselves have no alpha channel), so that
+  // the previews can be semi-transparent and let the scene behind them be seen. The picture is multiplied by the colour
+  // of the vertices by default, so only the blending has to be set up here.
+  pass->setVertexColourTracking(Ogre::TVC_DIFFUSE);
+  pass->setSceneBlending(Ogre::SBT_TRANSPARENT_ALPHA);
   return name;
 }
 

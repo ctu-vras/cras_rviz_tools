@@ -21,6 +21,7 @@ SPDX-FileCopyrightText: Czech Technical University in Prague
   <depend>image_transport</depend>
   <depend>libopencv-dev</depend>
   <depend>pluginlib</depend>
+  <depend>polygon_msgs</depend>
   <depend>rclcpp</depend>
   <depend>rviz_common</depend>
   <depend>rviz_rendering</depend>

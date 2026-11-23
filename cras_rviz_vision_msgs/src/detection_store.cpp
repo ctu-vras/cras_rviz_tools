@@ -33,6 +33,17 @@ constexpr const char* const CSV_SUFFIX = ".csv";
 //! Nanoseconds in one second.
 constexpr int64_t NS_PER_SEC = 1000000000LL;
 
+//! Replaces everything but letters, digits and dashes, so that the value can be used as a file or folder name.
+std::string sanitize(const std::string& name) {
+  std::string clean;
+  for (const auto character : name) {
+    const bool letter = (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+                        (character >= '0' && character <= '9');
+    clean += letter || character == '-' || character == '_' ? character : '_';
+  }
+  return clean;
+}
+
 std::string trimmed(const std::string& value) {
   const auto begin = value.find_first_not_of(" \t\r\n");
   if (begin == std::string::npos) {
@@ -331,6 +342,27 @@ std::vector<std::string> DetectionStore::csvFiles(const std::string& rootDir, in
   return files;
 }
 
+std::vector<std::string> DetectionStore::listFiles(const std::string& dir) {
+  std::vector<std::string> names;
+  std::error_code error;
+  if (dir.empty() || !std::filesystem::is_directory(dir, error)) {
+    return names;
+  }
+  for (const auto& entry : std::filesystem::directory_iterator(dir, error)) {
+    const auto name = entry.path().filename().string();
+    if (!name.empty() && name.front() != '.') {
+      names.push_back(name);
+    }
+  }
+  std::sort(names.begin(), names.end());
+  return names;
+}
+
+const std::vector<std::string>& DetectionStore::imageExtensions() {
+  static const std::vector<std::string> extensions {".jpg", ".jpeg", ".png"};
+  return extensions;
+}
+
 bool DetectionStore::parseRow(const std::map<std::string, std::string>& row, const std::string& rootDir,
     StoredRecord& record) {
   const auto value = [&row](const char* column) -> std::string {
@@ -351,6 +383,10 @@ bool DetectionStore::parseRow(const std::map<std::string, std::string>& row, con
   record.zoneFrame = value("zone_frame");
   record.zoneStatus = value("in_zone");
   record.imagePath = join(rootDir, value("image_path"));
+  // The frame of the camera which took the image tells the detections coming from several cameras apart; the old
+  // storage files do not have it and their detections are then not told apart.
+  record.imageFrame = value("image_frame");
+  record.cameraFrame = value("camera_frame");
 
   double number = 0.;
   if (toDouble(value("probability"), number)) {
@@ -466,6 +502,11 @@ std::vector<StoredRecord> DetectionStore::load(const StorageQuery& query, std::s
           std::find(query.classes.begin(), query.classes.end(), record.className) == query.classes.end())
       {
         continue;
+      }
+      if (!query.cameras.empty() &&
+          std::find(query.cameras.begin(), query.cameras.end(), record.cameraFrame) == query.cameras.end())
+      {
+        continue;  // a detection of another camera (or of an unknown one) is never one of the asked for cameras
       }
       if (query.zoneFilter > 0 && !record.inZone()) {
         continue;

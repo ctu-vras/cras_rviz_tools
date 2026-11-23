@@ -64,6 +64,8 @@ struct StoredRecord {
   std::string imagePath;  //!< Path of the stored image of the detection (empty if there is none).
   unsigned imageWidth {0};  //!< Width of the stored image [px].
   unsigned imageHeight {0};  //!< Height of the stored image [px].
+  std::string imageFrame;  //!< Frame of the camera the image was taken by (empty in the old storage format).
+  std::string cameraFrame;  //!< Frame of the camera the detection was reported in (empty if not recorded).
   //! Whether to show the detection at its global position instead of in the frame it was recorded in.
   bool preferGlobalFrame {false};
 
@@ -114,6 +116,9 @@ struct StorageQuery {
   //! loads everything up to now.
   int64_t endNs {std::numeric_limits<int64_t>::max()};
   std::vector<std::string> classes;  //!< Classes to load, empty for all of them.
+  //! Cameras (image frames) to load, empty for all of them. Several cameras can share the topic the detections are
+  //! recorded from, and their frames are the only thing to tell them apart.
+  std::vector<std::string> cameras;
   //! Keep only detections in a keep-out zone (1), outside of all of them (-1), or all of them (0).
   int zoneFilter {0};
   size_t limit {0};  //!< Maximal number of records to return (the newest ones), 0 for all of them.
@@ -123,8 +128,8 @@ struct StorageQuery {
  * \brief Reading of the persistent storage of detections written by g4s_mission.
  *
  * The storage contains one CSV file per day (\c detections_YYYY-MM-DD.csv) with appended rows, and the images of the
- * detections in \c images/YYYY-MM-DD/<class>/<id>.jpg. The reader is tolerant to incomplete and malformed rows (a day
- * file may be read while it is still being written), and it never throws.
+ * detections in \c images/YYYY-MM-DD/<camera>/<class>/<id>.jpg. The reader is tolerant to incomplete and malformed rows
+ * (a day file may be read while it is still being written), and it never throws.
  */
 class DetectionStore {
 public:
@@ -163,6 +168,20 @@ public:
    * \return the paths of the files that exist.
    */
   static std::vector<std::string> csvFiles(const std::string& rootDir, int64_t startNs, int64_t endNs);
+
+  /**
+   * \brief Names of the sub-directories of the given directory which are not hidden.
+   *
+   * Used to walk the folders of the image storage, whose names come from the sensor data (dates, camera frames and
+   * class names) and are therefore unknown in advance.
+   *
+   * \param[in] dir directory to look into.
+   * \return the names of the folders in it, sorted (an empty list if it does not exist).
+   */
+  static std::vector<std::string> listFiles(const std::string& dir);
+
+  //! File extensions of the stored detection images, in the order in which they are preferred.
+  static const std::vector<std::string>& imageExtensions();
 
   /**
    * \brief Parses one row of a detection CSV file.
